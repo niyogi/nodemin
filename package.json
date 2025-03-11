@@ -1,0 +1,13 @@
+{
+  "name": "nodemin",
+  "version": "1.0.0",
+  "description": "Nodemin is a lightweight Node.js module for managing PostgreSQL databases through a web interface. It provides a simple alternative to tools like Adminer, with features like table listing, row viewing/editing, searching, pagination, and schema inspection.",
+  "main": "nodemin.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
