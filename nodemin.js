@@ -622,6 +622,52 @@ const nodemin = () => {
                         console.error('Error clearing history:', error);
                     });
                 }
+                
+                // Bulk Operations Functions
+                function toggleSelectAll() {
+                    const selectAllCheckbox = document.getElementById('select-all');
+                    const rowCheckboxes = document.querySelectorAll('.row-checkbox');
+                    rowCheckboxes.forEach(cb => {
+                        cb.checked = selectAllCheckbox.checked;
+                    });
+                    updateBulkActionsBar();
+                }
+                
+                function updateBulkActionsBar() {
+                    const checkedBoxes = document.querySelectorAll('.row-checkbox:checked');
+                    const bulkBar = document.getElementById('bulk-actions-bar');
+                    const countSpan = document.getElementById('selected-count');
+                    
+                    if (checkedBoxes.length > 0) {
+                        bulkBar.classList.remove('hidden');
+                        countSpan.textContent = checkedBoxes.length;
+                    } else {
+                        bulkBar.classList.add('hidden');
+                    }
+                }
+                
+                function clearSelection() {
+                    const checkboxes = document.querySelectorAll('.row-checkbox, #select-all');
+                    checkboxes.forEach(cb => cb.checked = false);
+                    updateBulkActionsBar();
+                }
+                
+                function confirmBulkDelete() {
+                    const checkedBoxes = document.querySelectorAll('.row-checkbox:checked');
+                    if (checkedBoxes.length === 0) return;
+                    
+                    const ids = Array.from(checkedBoxes).map(cb => cb.value);
+                    document.getElementById('bulk-delete-count').textContent = ids.length;
+                    document.getElementById('bulk-delete-ids').value = JSON.stringify(ids);
+                    document.getElementById('bulk_delete_modal').showModal();
+                }
+                
+                // Add event listeners to row checkboxes
+                document.addEventListener('change', function(e) {
+                    if (e.target.classList.contains('row-checkbox')) {
+                        updateBulkActionsBar();
+                    }
+                });
             </script>
         </body>
         </html>
@@ -806,21 +852,24 @@ const nodemin = () => {
                 result = await pool.query(`SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`, [config.rowsPerPage, offset]);
             }
 
-            // Generate headers with XSS protection
-            const headers = columnNames.map(col => `<th>${escapeHtml(col)}</th>`).join('');
+            // Generate headers with XSS protection and bulk checkbox
+            const headers = (columnNames.map(col => `<th>${escapeHtml(col)}</th>`).join('')) + 
+                (!config.isReadOnly ? '<th class="w-10"><input type="checkbox" id="select-all" class="checkbox checkbox-sm" onclick="toggleSelectAll()"></th>' : '');
             
-            // Generate rows with XSS protection
+            // Generate rows with XSS protection and bulk checkboxes
             const rows = result.rows.length > 0 
-                ? result.rows.map(row => {
+                ? result.rows.map((row, index) => {
                     const cells = Object.values(row).map(val => `<td>${val === null ? 'NULL' : escapeHtml(val)}</td>`).join('');
-                    return `<tr>${cells}${
-                        !config.isReadOnly ? `<td class="flex gap-1">
-                            <a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/edit/${escapeHtml(row[pkColumn])}" class="btn btn-xs btn-primary">Edit</a>
-                            <button class="btn btn-xs btn-error" onclick="confirmDelete('${escapeHtml(tableName)}', '${escapeHtml(row[pkColumn])}')">Delete</button>
+                    const pkValue = escapeHtml(row[pkColumn]);
+                    return `<tr data-pk="${pkValue}">${cells}${
+                        !config.isReadOnly ? `<td class="flex gap-1 items-center">
+                            <input type="checkbox" class="row-checkbox checkbox checkbox-sm" value="${pkValue}" data-pk="${pkValue}">
+                            <a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/edit/${pkValue}" class="btn btn-xs btn-primary ml-2">Edit</a>
+                            <button class="btn btn-xs btn-error" onclick="confirmDelete('${escapeHtml(tableName)}', '${pkValue}')">Delete</button>
                         </td>` : ''
                     }</tr>`;
                   }).join('')
-                : `<tr><td colspan="${columnNames.length + (!config.isReadOnly ? 1 : 0)}" class="text-center">No data found</td></tr>`;
+                : `<tr><td colspan="${columnNames.length + (!config.isReadOnly ? 2 : 0)}" class="text-center">No data found</td></tr>`;
 
             // Get column information for insert form
             console.log('Getting column information for insert form:', tableName);
@@ -923,6 +972,17 @@ const nodemin = () => {
                 </dialog>
             ` : '';
             
+            // Bulk actions toolbar (hidden by default, shown when rows selected)
+            const bulkActionsToolbar = !config.isReadOnly ? `
+                <div id="bulk-actions-bar" class="hidden mb-4 p-3 bg-base-200 rounded-lg flex justify-between items-center">
+                    <span class="text-sm"><span id="selected-count">0</span> rows selected</span>
+                    <div class="flex gap-2">
+                        <button class="btn btn-sm btn-error" onclick="confirmBulkDelete()">Delete Selected</button>
+                        <button class="btn btn-sm btn-ghost" onclick="clearSelection()">Clear</button>
+                    </div>
+                </div>
+            ` : '';
+            
             const content = `
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="text-2xl">${escapeHtml(tableName)}</h2>
@@ -953,8 +1013,9 @@ const nodemin = () => {
                     <input type="text" name="q" placeholder="Search table..." class="input input-bordered w-full max-w-xs">
                     <button type="submit" class="btn btn-primary">Search</button>
                 </form>
+                ${bulkActionsToolbar}
                 <div class="overflow-x-auto">
-                    <table class="table table-zebra w-full">
+                    <table class="table table-zebra w-full" id="data-table">
                         <thead><tr>${headers}${!config.isReadOnly ? '<th>Actions</th>' : ''}</tr></thead>
                         <tbody>${rows}</tbody>
                     </table>
@@ -962,6 +1023,23 @@ const nodemin = () => {
                 <p class="mt-2 text-sm">Showing ${offset + 1} to ${Math.min(offset + config.rowsPerPage, totalRows)} of ${totalRows} rows</p>
                 ${getPagination(tableName, page, totalRows, '', baseUrl)}
                 ${insertModal}
+                
+                ${!config.isReadOnly ? `
+                <dialog id="bulk_delete_modal" class="modal">
+                    <div class="modal-box">
+                        <h3 class="font-bold text-lg text-error">Confirm Bulk Deletion</h3>
+                        <p class="py-4">Are you sure you want to delete <span id="bulk-delete-count">0</span> selected rows? This action cannot be undone.</p>
+                        <form id="bulk-delete-form" method="POST" action="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/bulk-delete">
+                            <input type="hidden" name="_csrf" value="${csrfToken}">
+                            <input type="hidden" name="ids" id="bulk-delete-ids">
+                            <div class="modal-action">
+                                <button type="submit" class="btn btn-error">Yes, Delete All</button>
+                                <button type="button" class="btn" onclick="document.getElementById('bulk_delete_modal').close()">Cancel</button>
+                            </div>
+                        </form>
+                    </div>
+                </dialog>
+                ` : ''}
             `;
             
             res.send(getHtmlTemplate(content, baseUrl));
@@ -1285,17 +1363,65 @@ const nodemin = () => {
             try {
                 const baseUrl = res.locals.baseUrl;
                 const { tableName, pkValue } = req.params;
+                
+                // Validate table name
+                if (!validateIdentifier(tableName)) {
+                    return res.status(400).send('Invalid table name');
+                }
+                
                 const pkColumn = await getPrimaryKey(tableName);
                 
+                // Use parameterized query for security
                 await pool.query(
-                    `DELETE FROM "${tableName}" WHERE "${pkColumn}" = '${pkValue}'`
+                    `DELETE FROM "${tableName}" WHERE "${pkColumn}" = $1`,
+                    [pkValue]
                 );
                 
                 res.redirect(`${baseUrl}/table/${tableName}`);
             } catch (err) {
                 console.error('Database Error:', err);
                 const errorMessage = err.message || 'Unable to delete the row. Please try again.';
-                res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${errorMessage}</span></div>`, res.locals.baseUrl));
+                res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${escapeHtml(errorMessage)}</span></div>`, res.locals.baseUrl));
+            }
+        });
+        
+        // Bulk Delete Rows
+        router.post('/table/:tableName/bulk-delete', async (req, res) => {
+            try {
+                const baseUrl = res.locals.baseUrl;
+                const { tableName } = req.params;
+                const { ids } = req.body;
+                
+                // Validate table name
+                if (!validateIdentifier(tableName)) {
+                    return res.status(400).send('Invalid table name');
+                }
+                
+                // Parse and validate IDs
+                let idArray;
+                try {
+                    idArray = JSON.parse(ids);
+                    if (!Array.isArray(idArray) || idArray.length === 0) {
+                        throw new Error('Invalid IDs');
+                    }
+                } catch (e) {
+                    return res.status(400).send('Invalid IDs provided');
+                }
+                
+                const pkColumn = await getPrimaryKey(tableName);
+                
+                // Use parameterized query with IN clause for security
+                const placeholders = idArray.map((_, i) => `$${i + 1}`).join(',');
+                await pool.query(
+                    `DELETE FROM "${tableName}" WHERE "${pkColumn}" IN (${placeholders})`,
+                    idArray
+                );
+                
+                res.redirect(`${baseUrl}/table/${tableName}`);
+            } catch (err) {
+                console.error('Bulk Delete Error:', err);
+                const errorMessage = err.message || 'Unable to delete rows. Please try again.';
+                res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${escapeHtml(errorMessage)}</span></div>`, res.locals.baseUrl));
             }
         });
         
