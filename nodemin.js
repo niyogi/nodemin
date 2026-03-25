@@ -1,7 +1,8 @@
-// nodemin.js
+// nodemin.js - SECURITY HARDENED VERSION
 const express = require('express');
 const { Pool } = require('pg');
 const basicAuth = require('express-basic-auth');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const nodemin = () => {
@@ -22,6 +23,9 @@ const nodemin = () => {
         connectionString: config.connectionString
     });
 
+    // CSRF Token storage (in-memory, per-session)
+    const csrfTokens = new Map();
+
     // Basic Authentication Middleware
     const auth = basicAuth({
         users: { [config.authUsername]: config.authPassword },
@@ -39,22 +43,59 @@ const nodemin = () => {
         next();
     });
 
+    // CSRF Token functions
+    function generateCsrfToken(sessionId) {
+        const token = crypto.randomBytes(32).toString('hex');
+        csrfTokens.set(sessionId, token);
+        return token;
+    }
+
+    function validateCsrfToken(sessionId, token) {
+        return csrfTokens.get(sessionId) === token;
+    }
+
+    function getSessionId(req) {
+        return req.headers.authorization || 'default';
+    }
+
+    // XSS Protection - HTML escape function
+    function escapeHtml(text) {
+        if (text === null || text === undefined) return '';
+        return String(text)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // SQL Injection Protection - Validate identifiers
+    function validateIdentifier(name) {
+        if (!name || typeof name !== 'string') return false;
+        return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
+    }
+
     // Get primary key for a table
     async function getPrimaryKey(tableName) {
+        // Validate table name to prevent SQL injection
+        if (!validateIdentifier(tableName)) {
+            throw new Error('Invalid table name');
+        }
+        
         try {
-            // Use a safer approach with explicit casting and error handling
+            // Use parameterized query for table name
             const result = await pool.query(`
                 SELECT a.attname
                 FROM pg_index i
                 JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-                WHERE i.indrelid = ('"' || '${tableName}' || '"')::regclass
+                WHERE i.indrelid = $1::regclass
                 AND i.indisprimary
-            `);
+            `, [`"${tableName}"`]);
             
             return result.rows[0]?.attname || 'id';
         } catch (err) {
             console.error('Error getting primary key:', err);
-            return 'id'; // Default to 'id' if we can't determine the primary key
+            return 'id';
         }
     }
     
@@ -92,7 +133,7 @@ const nodemin = () => {
     }
 
     // HTML Template with DaisyUI and Modal Script
-    const getHtmlTemplate = (content, baseUrl) => `
+    const getHtmlTemplate = (content, baseUrl, csrfToken = '') => `
         <!DOCTYPE html>
         <html data-theme="light">
         <head>
@@ -178,6 +219,7 @@ const nodemin = () => {
                         <h3 class="font-bold text-lg text-error">Confirm Deletion</h3>
                         <p class="py-4">Are you sure you want to delete this row? This action cannot be undone.</p>
                         <form id="delete-form" method="POST">
+                            <input type="hidden" name="_csrf" value="${csrfToken}">
                             <div class="modal-action">
                                 <button type="submit" class="btn btn-error">Yes, Delete</button>
                                 <button type="button" class="btn" onclick="document.getElementById('delete_confirm_modal').close()">Cancel</button>
@@ -360,10 +402,28 @@ const nodemin = () => {
         return pagination;
     };
 
+    // CSRF Protection Middleware for POST requests
+    const csrfProtection = (req, res, next) => {
+        if (req.method === 'POST') {
+            const sessionId = getSessionId(req);
+            const token = req.body._csrf || req.headers['x-csrf-token'];
+            if (!token || !validateCsrfToken(sessionId, token)) {
+                return res.status(403).send('<div class="alert alert-error"><span>Invalid CSRF token</span></div>');
+            }
+        }
+        next();
+    };
+
+    // Apply CSRF protection to all POST routes
+    router.post('*', csrfProtection);
+
     // Home - List Tables with Structure Links
     router.get('', async (req, res) => {
         try {
             const baseUrl = res.locals.baseUrl;
+            const sessionId = getSessionId(req);
+            const csrfToken = generateCsrfToken(sessionId);
+            
             const result = await pool.query(`
                 SELECT table_name 
                 FROM information_schema.tables 
@@ -375,42 +435,41 @@ const nodemin = () => {
             const tables = await Promise.all(result.rows.map(async row => {
                 const tableName = row.table_name;
                 
-                // Get row count for the table - using a safe approach to include table name
+                // Validate table name
+                if (!validateIdentifier(tableName)) return '';
+                
+                // Get row count for the table
                 const countResult = await pool.query(`SELECT COUNT(*) FROM "${tableName}"`);
                 const rowCount = parseInt(countResult.rows[0].count);
                 
                 const columns = await pool.query(`
-                    SELECT 
-                        column_name, 
-                        data_type, 
-                        is_nullable, 
-                        column_default
+                    SELECT column_name, data_type, is_nullable, column_default
                     FROM information_schema.columns 
-                    WHERE table_schema = 'public' AND table_name = '${tableName}'
+                    WHERE table_schema = 'public' AND table_name = $1
                     ORDER BY ordinal_position
-                `);
+                `, [tableName]);
 
                 const pkResult = await pool.query(`
                     SELECT a.attname
                     FROM pg_index i
                     JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-                    WHERE i.indrelid = ('"' || '${tableName}' || '"')::regclass AND i.indisprimary
-                `);
+                    WHERE i.indrelid = $1::regclass AND i.indisprimary
+                `, [`"${tableName}"`]);
                 const primaryKeys = pkResult.rows.map(r => r.attname);
 
                 const columnRows = columns.rows.map(col => `
                     <tr>
-                        <td>${col.column_name}${primaryKeys.includes(col.column_name) ? ' <span class="badge badge-primary">PK</span>' : ''}</td>
-                        <td>${col.data_type}</td>
-                        <td>${col.is_nullable}</td>
-                        <td>${col.column_default || 'NULL'}</td>
+                        <td>${escapeHtml(col.column_name)}${primaryKeys.includes(col.column_name) ? ' <span class="badge badge-primary">PK</span>' : ''}</td>
+                        <td>${escapeHtml(col.data_type)}</td>
+                        <td>${escapeHtml(col.is_nullable)}</td>
+                        <td>${escapeHtml(col.column_default) || 'NULL'}</td>
                     </tr>
                 `).join('');
 
                 modals += `
-                    <dialog id="modal_${tableName}" class="modal">
+                    <dialog id="modal_${escapeHtml(tableName)}" class="modal">
                         <div class="modal-box">
-                            <h3 class="font-bold text-lg">${tableName} Structure</h3>
+                            <h3 class="font-bold text-lg">${escapeHtml(tableName)} Structure</h3>
                             <div class="overflow-x-auto">
                                 <table class="table table-zebra w-full">
                                     <thead>
@@ -435,9 +494,9 @@ const nodemin = () => {
 
                 return `
                     <li>
-                        <a href="${baseUrl}/table/${tableName}" class="link link-primary">${tableName}</a>
+                        <a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}" class="link link-primary">${escapeHtml(tableName)}</a>
                         <span class="badge badge-sm badge-outline ml-2">${rowCount} rows</span>
-                        <a href="#" class="link link-secondary text-sm ml-2 structure-link" data-modal="modal_${tableName}">[Structure]</a>
+                        <a href="#" class="link link-secondary text-sm ml-2 structure-link" data-modal="modal_${escapeHtml(tableName)}">[Structure]</a>
                     </li>
                 `;
             }));
@@ -448,11 +507,10 @@ const nodemin = () => {
                 ${modals}
             `;
             
-            res.send(getHtmlTemplate(content, baseUrl));
+            res.send(getHtmlTemplate(content, baseUrl, csrfToken));
         } catch (err) {
             console.error('Database Error:', err);
-            const errorMessage = err.message || 'Unable to connect to the database. Please check your connection string and ensure PostgreSQL is running.';
-            res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${errorMessage}</span></div>`, res.locals.baseUrl));
+            res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${escapeHtml(err.message)}</span></div>`, res.locals.baseUrl));
         }
     });
 
