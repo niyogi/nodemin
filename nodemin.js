@@ -99,6 +99,38 @@ const nodemin = () => {
         }
     }
     
+    // Get foreign key relationships for a table
+    async function getForeignKeys(tableName) {
+        if (!validateIdentifier(tableName)) {
+            return [];
+        }
+        
+        try {
+            const result = await pool.query(`
+                SELECT
+                    tc.constraint_name,
+                    kcu.column_name,
+                    ccu.table_name AS referenced_table,
+                    ccu.column_name AS referenced_column
+                FROM information_schema.table_constraints AS tc
+                JOIN information_schema.key_column_usage AS kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.constraint_column_usage AS ccu
+                    ON ccu.constraint_name = tc.constraint_name
+                    AND ccu.table_schema = tc.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                    AND tc.table_name = $1
+                    AND tc.table_schema = 'public'
+            `, [tableName]);
+            
+            return result.rows;
+        } catch (err) {
+            console.error('Error getting foreign keys:', err);
+            return [];
+        }
+    }
+    
     // Map PostgreSQL data types to HTML input types
     function getInputTypeForDataType(dataType) {
         const typeMap = {
@@ -752,15 +784,27 @@ const nodemin = () => {
                     WHERE i.indrelid = $1::regclass AND i.indisprimary
                 `, [`"${tableName}"`]);
                 const primaryKeys = pkResult.rows.map(r => r.attname);
+                
+                // Get foreign keys
+                const fkResult = await getForeignKeys(tableName);
+                const foreignKeys = fkResult.rows;
 
-                const columnRows = columns.rows.map(col => `
-                    <tr>
-                        <td>${escapeHtml(col.column_name)}${primaryKeys.includes(col.column_name) ? ' <span class="badge badge-primary">PK</span>' : ''}</td>
+                const columnRows = columns.rows.map(col => {
+                    const fk = foreignKeys.find(fk => fk.column_name === col.column_name);
+                    let badges = '';
+                    if (primaryKeys.includes(col.column_name)) {
+                        badges += ' <span class="badge badge-primary">PK</span>';
+                    }
+                    if (fk) {
+                        badges += ` <span class="badge badge-secondary">FK → ${escapeHtml(fk.referenced_table)}</span>`;
+                    }
+                    return `<tr>
+                        <td>${escapeHtml(col.column_name)}${badges}</td>
                         <td>${escapeHtml(col.data_type)}</td>
                         <td>${escapeHtml(col.is_nullable)}</td>
                         <td>${escapeHtml(col.column_default) || 'NULL'}</td>
-                    </tr>
-                `).join('');
+                    </tr>`;
+                }).join('');
 
                 modals += `
                     <dialog id="modal_${escapeHtml(tableName)}" class="modal">
@@ -779,6 +823,7 @@ const nodemin = () => {
                                     <tbody>${columnRows}</tbody>
                                 </table>
                             </div>
+                            ${foreignKeys.length > 0 ? `<div class="mt-4"><h4 class="font-bold text-sm mb-2">Foreign Key Relationships:</h4><ul class="text-sm">${foreignKeys.map(fk => `<li>• ${escapeHtml(fk.column_name)} → <a href="${escapeHtml(baseUrl)}/table/${escapeHtml(fk.referenced_table)}" class="link link-primary">${escapeHtml(fk.referenced_table)}</a>.${escapeHtml(fk.referenced_column)}</li>`).join('')}</ul></div>` : ''}
                             <div class="modal-action">
                                 <form method="dialog">
                                     <button class="btn">Close</button>
@@ -1327,34 +1372,52 @@ const nodemin = () => {
             try {
                 const baseUrl = res.locals.baseUrl;
                 const { tableName, pkValue } = req.params;
+                
+                // Validate table name
+                if (!validateIdentifier(tableName)) {
+                    return res.status(400).send('Invalid table name');
+                }
+                
                 const pkColumn = await getPrimaryKey(tableName);
                 const updates = req.body;
                 
-                // Build the SET clause with values directly in the query
-                const setClause = Object.entries(updates)
-                    .map(([key, value]) => {
-                        // Handle different value types
-                        if (value === null) {
-                            return `"${key}" = NULL`;
-                        } else if (typeof value === 'number') {
-                            return `"${key}" = ${value}`;
-                        } else {
-                            // Escape single quotes in string values
-                            const escapedValue = value.toString().replace(/'/g, "''");
-                            return `"${key}" = '${escapedValue}'`;
-                        }
-                    })
-                    .join(', ');
-
+                // Filter out CSRF field
+                const filteredUpdates = Object.fromEntries(
+                    Object.entries(updates).filter(([key]) => key !== '_csrf')
+                );
+                
+                if (Object.keys(filteredUpdates).length === 0) {
+                    return res.send(getHtmlTemplate('<div class="alert alert-error"><span>Error: No data provided for update</span></div>', baseUrl));
+                }
+                
+                // Build parameterized SET clause
+                const setClauses = [];
+                const values = [];
+                let paramIndex = 1;
+                
+                for (const [key, value] of Object.entries(filteredUpdates)) {
+                    // Validate column name
+                    if (!validateIdentifier(key)) {
+                        continue; // Skip invalid column names
+                    }
+                    setClauses.push(`"${key}" = $${paramIndex}`);
+                    values.push(value);
+                    paramIndex++;
+                }
+                
+                values.push(pkValue); // WHERE clause parameter
+                
+                // Use parameterized query for security
                 await pool.query(
-                    `UPDATE "${tableName}" SET ${setClause} WHERE "${pkColumn}" = '${pkValue}'`
+                    `UPDATE "${tableName}" SET ${setClauses.join(', ')} WHERE "${pkColumn}" = $${paramIndex}`,
+                    values
                 );
 
                 res.redirect(`${baseUrl}/table/${tableName}`);
             } catch (err) {
                 console.error('Database Error:', err);
-                const errorMessage = err.message || 'Unable to connect to the database. Please check your connection string and ensure PostgreSQL is running.';
-                res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${errorMessage}</span></div>`, res.locals.baseUrl));
+                const errorMessage = err.message || 'Unable to update data. Please check your input and try again.';
+                res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${escapeHtml(errorMessage)}</span></div>`, baseUrl));
             }
         });
         
@@ -1432,9 +1495,14 @@ const nodemin = () => {
                 const { tableName } = req.params;
                 const data = req.body;
                 
-                // Filter out empty values for nullable columns
+                // Validate table name
+                if (!validateIdentifier(tableName)) {
+                    return res.status(400).send('Invalid table name');
+                }
+                
+                // Filter out empty values for nullable columns and CSRF field
                 const filteredData = Object.fromEntries(
-                    Object.entries(data).filter(([_, value]) => value !== '')
+                    Object.entries(data).filter(([key, value]) => key !== '_csrf' && value !== '')
                 );
                 
                 if (Object.keys(filteredData).length === 0) {
@@ -1442,27 +1510,19 @@ const nodemin = () => {
                 }
                 
                 const columns = Object.keys(filteredData);
-                const values = Object.values(filteredData).map(value => {
-                    if (value === null) {
-                        return 'NULL';
-                    } else if (typeof value === 'number') {
-                        return value;
-                    } else {
-                        // Escape single quotes in string values
-                        const escapedValue = value.toString().replace(/'/g, "''");
-                        return `'${escapedValue}'`;
-                    }
-                });
+                const values = Object.values(filteredData);
                 
-                const query = `INSERT INTO "${tableName}" (${columns.map(col => `"${col}"`).join(', ')}) VALUES (${values.join(', ')})`;
+                // Use parameterized query for security
+                const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
+                const query = `INSERT INTO "${tableName}" (${columns.map(col => `"${col}"`).join(', ')}) VALUES (${placeholders})`;
                 
-                await pool.query(query);
+                await pool.query(query, values);
                 
                 res.redirect(`${baseUrl}/table/${tableName}`);
             } catch (err) {
                 console.error('Database Error:', err);
                 const errorMessage = err.message || 'Unable to insert data. Please check your input and try again.';
-                res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${errorMessage}</span></div>`, res.locals.baseUrl));
+                res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${escapeHtml(errorMessage)}</span></div>`, res.locals.baseUrl));
             }
         });
     }
