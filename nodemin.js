@@ -179,6 +179,12 @@ const nodemin = () => {
                                 <li><a onclick="setTheme('dracula')">Dracula</a></li>
                             </ul>
                         </div>
+                        <button class="btn btn-ghost" onclick="loadQueryHistory(); document.getElementById('history_modal').showModal()">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            History
+                        </button>
                         <button class="btn btn-primary" onclick="document.getElementById('sql_modal').showModal()">Execute SQL</button>
                         <a href="${baseUrl}/logout" class="btn btn-outline btn-error">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
@@ -241,6 +247,21 @@ const nodemin = () => {
                         <div id="sql-result" class="py-4 overflow-x-auto"></div>
                         <div class="modal-action">
                             <button type="button" class="btn" onclick="document.getElementById('sql_result_modal').close()">Close</button>
+                        </div>
+                    </div>
+                </dialog>
+                
+                <dialog id="history_modal" class="modal">
+                    <div class="modal-box max-w-3xl">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-bold text-lg">Query History</h3>
+                            <button type="button" class="btn btn-sm btn-error" onclick="clearQueryHistory()">Clear History</button>
+                        </div>
+                        <div id="query-history-list" class="space-y-2 max-h-96 overflow-y-auto">
+                            <p class="text-gray-500">No queries yet...</p>
+                        </div>
+                        <div class="modal-action">
+                            <button type="button" class="btn" onclick="document.getElementById('history_modal').close()">Close</button>
                         </div>
                     </div>
                 </dialog>
@@ -408,6 +429,64 @@ const nodemin = () => {
                               '? - Show this help');
                     }
                 });
+                
+                // Query History Functions
+                function loadQueryHistory() {
+                    fetch('${baseUrl}/query-history')
+                        .then(response => response.json())
+                        .then(history => {
+                            const listEl = document.getElementById('query-history-list');
+                            if (history.length === 0) {
+                                listEl.innerHTML = '<p class="text-gray-500">No queries yet...</p>';
+                                return;
+                            }
+                            listEl.innerHTML = history.map((item, index) => `
+                                <div class="card bg-base-200 cursor-pointer hover:bg-base-300" onclick="loadQueryFromHistory(${index})">
+                                    <div class="card-body p-3">
+                                        <div class="flex justify-between items-start">
+                                            <code class="text-sm break-all">${escapeHtml(item.query.substring(0, 100))}${item.query.length > 100 ? '...' : ''}</code>
+                                            <span class="text-xs text-gray-500">${new Date(item.timestamp).toLocaleTimeString()}</span>
+                                        </div>
+                                        <div class="text-xs text-gray-500 mt-1">
+                                            ${item.command} • ${item.rowCount} rows
+                                        </div>
+                                    </div>
+                                </div>
+                            `).join('');
+                            // Store history for loading
+                            window.queryHistoryData = history;
+                        })
+                        .catch(error => {
+                            console.error('Error loading query history:', error);
+                        });
+                }
+                
+                function loadQueryFromHistory(index) {
+                    if (window.queryHistoryData && window.queryHistoryData[index]) {
+                        sqlEditor.setValue(window.queryHistoryData[index].query);
+                        document.getElementById('history_modal').close();
+                        document.getElementById('sql_modal').showModal();
+                        sqlEditor.focus();
+                    }
+                }
+                
+                function clearQueryHistory() {
+                    if (!confirm('Clear all query history?')) return;
+                    fetch('${baseUrl}/clear-query-history', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-Token': '${csrfToken}'
+                        }
+                    })
+                    .then(() => {
+                        document.getElementById('query-history-list').innerHTML = '<p class="text-gray-500">No queries yet...</p>';
+                        window.queryHistoryData = [];
+                    })
+                    .catch(error => {
+                        console.error('Error clearing history:', error);
+                    });
+                }
             </script>
         </body>
         </html>
@@ -1246,6 +1325,10 @@ const nodemin = () => {
         `);
     });
     
+    // Query History storage (in-memory, per-session)
+    const queryHistory = new Map();
+    const MAX_HISTORY_ITEMS = 50;
+
     // Execute SQL Query
     router.post('/execute-sql', async (req, res) => {
         try {
@@ -1267,6 +1350,23 @@ const nodemin = () => {
             // Execute the query
             const result = await pool.query(query);
             
+            // Save to query history
+            const sessionId = getSessionId(req);
+            if (!queryHistory.has(sessionId)) {
+                queryHistory.set(sessionId, []);
+            }
+            const history = queryHistory.get(sessionId);
+            history.unshift({
+                query: query.substring(0, 1000), // Limit query length
+                timestamp: new Date().toISOString(),
+                command: result.command,
+                rowCount: result.rowCount
+            });
+            // Keep only last N items
+            if (history.length > MAX_HISTORY_ITEMS) {
+                history.pop();
+            }
+            
             // Return the result
             res.json({
                 command: result.command,
@@ -1280,6 +1380,20 @@ const nodemin = () => {
                 error: errorMessage
             });
         }
+    });
+
+    // Get Query History
+    router.get('/query-history', (req, res) => {
+        const sessionId = getSessionId(req);
+        const history = queryHistory.get(sessionId) || [];
+        res.json(history);
+    });
+
+    // Clear Query History
+    router.post('/clear-query-history', (req, res) => {
+        const sessionId = getSessionId(req);
+        queryHistory.delete(sessionId);
+        res.json({ success: true });
     });
 
     return router;
