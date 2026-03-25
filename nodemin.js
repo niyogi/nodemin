@@ -217,6 +217,12 @@ const nodemin = () => {
                             </svg>
                             History
                         </button>
+                        <button class="btn btn-ghost" onclick="loadQueryBookmarks(); document.getElementById('bookmarks_modal').showModal()">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0111.186 0z" />
+                            </svg>
+                            Bookmarks
+                        </button>
                         <button class="btn btn-ghost" onclick="loadConnectionProfiles(); document.getElementById('profiles_modal').showModal()">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -328,6 +334,24 @@ const nodemin = () => {
                         <div class="modal-action">
                             <button type="button" class="btn btn-primary" onclick="saveConnectionProfile()">Save Profile</button>
                             <button type="button" class="btn" onclick="document.getElementById('profiles_modal').close()">Close</button>
+                        </div>
+                    </div>
+                </dialog>
+                
+                <dialog id="bookmarks_modal" class="modal">
+                    <div class="modal-box max-w-2xl">
+                        <h3 class="font-bold text-lg mb-4">Query Bookmarks</h3>
+                        <div id="bookmarks-list" class="space-y-2 mb-4 max-h-64 overflow-y-auto">
+                            <p class="text-gray-500">No saved bookmarks...</p>
+                        </div>
+                        <div class="divider">Save Current Query</div>
+                        <form id="bookmark-form" class="space-y-3">
+                            <input type="text" id="bookmark-name" placeholder="Bookmark Name" class="input input-bordered w-full" required>
+                            <textarea id="bookmark-query" class="textarea textarea-bordered w-full h-24" placeholder="Query will be filled when you click 'Load to Editor' on a saved bookmark" readonly></textarea>
+                        </form>
+                        <div class="modal-action">
+                            <button type="button" class="btn btn-primary" onclick="saveCurrentQueryAsBookmark()">Save Bookmark</button>
+                            <button type="button" class="btn" onclick="document.getElementById('bookmarks_modal').close()">Close</button>
                         </div>
                     </div>
                 </dialog>
@@ -700,6 +724,99 @@ const nodemin = () => {
                         updateBulkActionsBar();
                     }
                 });
+                
+                // Query Bookmarks Functions
+                function loadQueryBookmarks() {
+                    fetch('${baseUrl}/api/bookmarks')
+                        .then(response => response.json())
+                        .then(bookmarks => {
+                            const listEl = document.getElementById('bookmarks-list');
+                            if (bookmarks.length === 0) {
+                                listEl.innerHTML = '<p class="text-gray-500">No saved bookmarks...</p>';
+                                return;
+                            }
+                            listEl.innerHTML = bookmarks.map(bookmark => `
+                                <div class="card bg-base-200">
+                                    <div class="card-body p-3">
+                                        <div class="flex justify-between items-start">
+                                            <h4 class="font-bold">${escapeHtml(bookmark.name)}</h4>
+                                            <button class="btn btn-sm btn-error" onclick="deleteBookmark('${bookmark.id}')">Delete</button>
+                                        </div>
+                                        <code class="text-sm break-all block mt-1">${escapeHtml(bookmark.query.substring(0, 100))}${bookmark.query.length > 100 ? '...' : ''}</code>
+                                        <button class="btn btn-sm btn-primary mt-2" onclick="loadBookmarkQuery('${bookmark.id}')">Load to Editor</button>
+                                    </div>
+                                </div>
+                            `).join('');
+                            window.bookmarksData = bookmarks;
+                        })
+                        .catch(error => {
+                            console.error('Error loading bookmarks:', error);
+                        });
+                }
+                
+                function loadBookmarkQuery(bookmarkId) {
+                    if (window.bookmarksData) {
+                        const bookmark = window.bookmarksData.find(b => b.id === bookmarkId);
+                        if (bookmark) {
+                            sqlEditor.setValue(bookmark.query);
+                            document.getElementById('bookmarks_modal').close();
+                            document.getElementById('sql_modal').showModal();
+                            sqlEditor.focus();
+                        }
+                    }
+                }
+                
+                function saveCurrentQueryAsBookmark() {
+                    const nameInput = document.getElementById('bookmark-name');
+                    const name = nameInput.value.trim();
+                    const query = sqlEditor.getValue().trim();
+                    
+                    if (!name) {
+                        alert('Please enter a bookmark name');
+                        return;
+                    }
+                    if (!query) {
+                        alert('No query to save');
+                        return;
+                    }
+                    
+                    fetch('${baseUrl}/api/bookmarks', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-Token': '${csrfToken}'
+                        },
+                        body: JSON.stringify({ name, query })
+                    })
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.success) {
+                            nameInput.value = '';
+                            loadQueryBookmarks();
+                        } else {
+                            alert('Error: ' + result.error);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error saving bookmark:', error);
+                    });
+                }
+                
+                function deleteBookmark(bookmarkId) {
+                    if (!confirm('Delete this bookmark?')) return;
+                    fetch('${baseUrl}/api/bookmarks/' + bookmarkId, {
+                        method: 'DELETE',
+                        headers: {
+                            'X-CSRF-Token': '${csrfToken}'
+                        }
+                    })
+                    .then(() => {
+                        loadQueryBookmarks();
+                    })
+                    .catch(error => {
+                        console.error('Error deleting bookmark:', error);
+                    });
+                }
             </script>
         </body>
         </html>
@@ -870,7 +987,11 @@ const nodemin = () => {
             }
             
             const page = parseInt(req.query.page) || 1;
-            const offset = (page - 1) * config.rowsPerPage;
+            // Allow configurable page size: 25, 50, 100
+            const sizeOptions = [25, 50, 100];
+            let pageSize = parseInt(req.query.size) || config.rowsPerPage;
+            if (!sizeOptions.includes(pageSize)) pageSize = config.rowsPerPage;
+            const offset = (page - 1) * pageSize;
             const pkColumn = await getPrimaryKey(tableName);
             
             const countResult = await pool.query(`SELECT COUNT(*) FROM "${tableName}"`);
@@ -892,9 +1013,9 @@ const nodemin = () => {
                 const query = pkColumn && pkColumn !== 'id'
                     ? `SELECT * FROM "${tableName}" ORDER BY "${pkColumn}" LIMIT $1 OFFSET $2`
                     : `SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`;
-                result = await pool.query(query, [config.rowsPerPage, offset]);
+                result = await pool.query(query, [pageSize, offset]);
             } catch (err) {
-                result = await pool.query(`SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`, [config.rowsPerPage, offset]);
+                result = await pool.query(`SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`, [pageSize, offset]);
             }
 
             // Generate headers with XSS protection and bulk checkbox
@@ -1058,6 +1179,17 @@ const nodemin = () => {
                     <input type="text" name="q" placeholder="Search table..." class="input input-bordered w-full max-w-xs">
                     <button type="submit" class="btn btn-primary">Search</button>
                 </form>
+                <div class="flex justify-between items-center mt-2 mb-2">
+                    <div class="flex items-center gap-2">
+                        <span class="text-sm">Rows per page:</span>
+                        <select class="select select-bordered select-sm w-20" onchange="window.location.href='${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}?page=1&size=' + this.value">
+                            <option value="25" ${pageSize === 25 ? 'selected' : ''}>25</option>
+                            <option value="50" ${pageSize === 50 ? 'selected' : ''}>50</option>
+                            <option value="100" ${pageSize === 100 ? 'selected' : ''}>100</option>
+                        </select>
+                    </div>
+                    <span class="text-sm">Showing ${offset + 1} to ${Math.min(offset + pageSize, totalRows)} of ${totalRows} rows</span>
+                </div>
                 ${bulkActionsToolbar}
                 <div class="overflow-x-auto">
                     <table class="table table-zebra w-full" id="data-table">
@@ -1065,7 +1197,6 @@ const nodemin = () => {
                         <tbody>${rows}</tbody>
                     </table>
                 </div>
-                <p class="mt-2 text-sm">Showing ${offset + 1} to ${Math.min(offset + config.rowsPerPage, totalRows)} of ${totalRows} rows</p>
                 ${getPagination(tableName, page, totalRows, '', baseUrl)}
                 ${insertModal}
                 
@@ -1714,6 +1845,62 @@ const nodemin = () => {
     router.post('/clear-query-history', (req, res) => {
         const sessionId = getSessionId(req);
         queryHistory.delete(sessionId);
+        res.json({ success: true });
+    });
+
+    // Query Bookmarks API
+    const queryBookmarks = new Map();
+    
+    router.get('/api/bookmarks', (req, res) => {
+        const sessionId = getSessionId(req);
+        const bookmarks = queryBookmarks.get(sessionId) || [];
+        res.json(bookmarks);
+    });
+    
+    router.post('/api/bookmarks', (req, res) => {
+        try {
+            const sessionId = getSessionId(req);
+            const { name, query } = req.body;
+            
+            if (!name || !query) {
+                return res.status(400).json({ error: 'Name and query are required' });
+            }
+            
+            if (!queryBookmarks.has(sessionId)) {
+                queryBookmarks.set(sessionId, []);
+            }
+            
+            const bookmarks = queryBookmarks.get(sessionId);
+            const bookmark = {
+                id: crypto.randomUUID(),
+                name: name.substring(0, 100),
+                query: query.substring(0, 2000),
+                createdAt: new Date().toISOString()
+            };
+            
+            bookmarks.push(bookmark);
+            res.json({ success: true, bookmark: { id: bookmark.id, name: bookmark.name } });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+    
+    router.delete('/api/bookmarks/:id', (req, res) => {
+        const sessionId = getSessionId(req);
+        const bookmarkId = req.params.id;
+        
+        if (!queryBookmarks.has(sessionId)) {
+            return res.status(404).json({ error: 'Bookmark not found' });
+        }
+        
+        const bookmarks = queryBookmarks.get(sessionId);
+        const index = bookmarks.findIndex(b => b.id === bookmarkId);
+        
+        if (index === -1) {
+            return res.status(404).json({ error: 'Bookmark not found' });
+        }
+        
+        bookmarks.splice(index, 1);
         res.json({ success: true });
     });
 
