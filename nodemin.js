@@ -518,7 +518,16 @@ const nodemin = () => {
     router.get('/table/:tableName', async (req, res) => {
         try {
             const baseUrl = res.locals.baseUrl;
+            const sessionId = getSessionId(req);
+            const csrfToken = generateCsrfToken(sessionId);
+            
             const tableName = req.params.tableName;
+            
+            // Validate table name
+            if (!validateIdentifier(tableName)) {
+                return res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Invalid table name</span></div>`, baseUrl));
+            }
+            
             const page = parseInt(req.query.page) || 1;
             const offset = (page - 1) * config.rowsPerPage;
             const pkColumn = await getPrimaryKey(tableName);
@@ -526,61 +535,38 @@ const nodemin = () => {
             const countResult = await pool.query(`SELECT COUNT(*) FROM "${tableName}"`);
             const totalRows = parseInt(countResult.rows[0].count);
 
-            // Get column information first to handle empty tables
+            // Get column information
             const columnListInfo = await pool.query(`
                 SELECT column_name 
                 FROM information_schema.columns 
-                WHERE table_schema = 'public' AND table_name = '${tableName}'
+                WHERE table_schema = 'public' AND table_name = $1
                 ORDER BY ordinal_position
-            `);
+            `, [tableName]);
             
             const columnNames = columnListInfo.rows.map(row => row.column_name);
             
-            // Now query the actual data - handle the case where there might not be a primary key
+            // Query with parameterized limit/offset
             let result;
             try {
-                // Use a completely different approach to avoid parameter type issues
-                // First get the primary key column name
-                console.log('Table name:', tableName);
-                console.log('Primary key column:', pkColumn);
-                
-                // Build the query without using parameters
-                let query;
-                if (pkColumn && pkColumn !== 'id') {
-                    // If we have a valid primary key that's not the default 'id'
-                    query = `SELECT * FROM "${tableName}" ORDER BY "${pkColumn}" LIMIT ${config.rowsPerPage} OFFSET ${offset}`;
-                } else {
-                    // If we don't have a valid primary key or it's the default 'id', try without ordering
-                    query = `SELECT * FROM "${tableName}" LIMIT ${config.rowsPerPage} OFFSET ${offset}`;
-                }
-                
-                console.log('Executing query:', query);
-                result = await pool.query(query);
+                const query = pkColumn && pkColumn !== 'id'
+                    ? `SELECT * FROM "${tableName}" ORDER BY "${pkColumn}" LIMIT $1 OFFSET $2`
+                    : `SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`;
+                result = await pool.query(query, [config.rowsPerPage, offset]);
             } catch (err) {
-                // If the query fails, try a simpler query without ordering
-                console.error('Error executing query:', err);
-                
-                try {
-                    const simpleQuery = `SELECT * FROM "${tableName}" LIMIT ${config.rowsPerPage} OFFSET ${offset}`;
-                    console.log('Trying simple query:', simpleQuery);
-                    result = await pool.query(simpleQuery);
-                } catch (fallbackErr) {
-                    console.error('Error with simple query:', fallbackErr);
-                    throw fallbackErr; // Re-throw to be caught by the outer try/catch
-                }
+                result = await pool.query(`SELECT * FROM "${tableName}" LIMIT $1 OFFSET $2`, [config.rowsPerPage, offset]);
             }
 
-            // Generate headers from column names, not from the first row (which might not exist)
-            const headers = columnNames.map(col => `<th>${col}</th>`).join('');
+            // Generate headers with XSS protection
+            const headers = columnNames.map(col => `<th>${escapeHtml(col)}</th>`).join('');
             
-            // Generate rows, handling the case when there are no rows
+            // Generate rows with XSS protection
             const rows = result.rows.length > 0 
                 ? result.rows.map(row => {
-                    const cells = Object.values(row).map(val => `<td>${val === null ? 'NULL' : val}</td>`).join('');
+                    const cells = Object.values(row).map(val => `<td>${val === null ? 'NULL' : escapeHtml(val)}</td>`).join('');
                     return `<tr>${cells}${
                         !config.isReadOnly ? `<td class="flex gap-1">
-                            <a href="${baseUrl}/table/${tableName}/edit/${row[pkColumn]}" class="btn btn-xs btn-primary">Edit</a>
-                            <button class="btn btn-xs btn-error" onclick="confirmDelete('${tableName}', '${row[pkColumn]}')">Delete</button>
+                            <a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/edit/${escapeHtml(row[pkColumn])}" class="btn btn-xs btn-primary">Edit</a>
+                            <button class="btn btn-xs btn-error" onclick="confirmDelete('${escapeHtml(tableName)}', '${escapeHtml(row[pkColumn])}')">Delete</button>
                         </td>` : ''
                     }</tr>`;
                   }).join('')
