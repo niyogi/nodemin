@@ -370,8 +370,44 @@ const nodemin = () => {
                     .catch(error => {
                         document.getElementById('sql-result').innerHTML = '<div class="alert alert-error"><span>Error: ' + error.message + '</span></div>';
                         document.getElementById('sql_result_modal').showModal();
-                    });
                 }
+                
+                // Keyboard Shortcuts
+                document.addEventListener('keydown', function(e) {
+                    // Cmd/Ctrl+Enter to execute SQL
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                        const sqlModal = document.getElementById('sql_modal');
+                        if (sqlModal.open && sqlEditor) {
+                            e.preventDefault();
+                            confirmSqlExecution();
+                        }
+                    }
+                    
+                    // ESC to close modals
+                    if (e.key === 'Escape') {
+                        const modals = document.querySelectorAll('dialog.modal[open]');
+                        if (modals.length > 0) {
+                            // Close the last opened modal
+                            modals[modals.length - 1].close();
+                        }
+                    }
+                    
+                    // Cmd/Ctrl+K for command palette (placeholder for future)
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+                        e.preventDefault();
+                        // Future: Show command palette
+                        console.log('Command palette shortcut pressed');
+                    }
+                    
+                    // ? to show keyboard shortcuts help
+                    if (e.key === '?' && !e.target.matches('input, textarea, [contenteditable]')) {
+                        e.preventDefault();
+                        alert('Keyboard Shortcuts:\n' +
+                              'Cmd/Ctrl+Enter - Execute SQL query\n' +
+                              'ESC - Close modals\n' +
+                              '? - Show this help');
+                    }
+                });
             </script>
         </body>
         </html>
