@@ -304,12 +304,26 @@ const nodemin = () => {
                 // CodeMirror editor instance
                 let sqlEditor;
                 
-                // Load saved theme from localStorage or use default
+                // Load saved theme from localStorage or detect system preference
                 document.addEventListener('DOMContentLoaded', function() {
                     const savedTheme = localStorage.getItem('nodemin-theme');
                     if (savedTheme) {
                         document.documentElement.setAttribute('data-theme', savedTheme);
+                    } else {
+                        // Detect system preference
+                        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                        const defaultTheme = prefersDark ? 'dark' : 'light';
+                        document.documentElement.setAttribute('data-theme', defaultTheme);
+                        localStorage.setItem('nodemin-theme', defaultTheme);
                     }
+                    
+                    // Listen for system theme changes
+                    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
+                        const newTheme = e.matches ? 'dark' : 'light';
+                        document.documentElement.setAttribute('data-theme', newTheme);
+                        localStorage.setItem('nodemin-theme', newTheme);
+                        document.dispatchEvent(new Event('themechange'));
+                    });
                     
                     // Initialize CodeMirror
                     sqlEditor = CodeMirror(document.getElementById('sql-editor'), {
@@ -454,11 +468,20 @@ const nodemin = () => {
                         console.log('Command palette shortcut pressed');
                     }
                     
+                    // Cmd/Ctrl+Shift+L to toggle theme
+                    if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === 'L') {
+                        e.preventDefault();
+                        const currentTheme = document.documentElement.getAttribute('data-theme');
+                        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                        setTheme(newTheme);
+                    }
+                    
                     // ? to show keyboard shortcuts help
                     if (e.key === '?' && !e.target.matches('input, textarea, [contenteditable]')) {
                         e.preventDefault();
                         alert('Keyboard Shortcuts:\n' +
                               'Cmd/Ctrl+Enter - Execute SQL query\n' +
+                              'Cmd/Ctrl+Shift+L - Toggle dark/light mode\n' +
                               'ESC - Close modals\n' +
                               '? - Show this help');
                     }
