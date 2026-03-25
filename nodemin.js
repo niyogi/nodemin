@@ -960,7 +960,15 @@ const nodemin = () => {
             }));
 
             const content = `
-                <h2 class="text-2xl mb-2">Tables</h2>
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl">Tables</h2>
+                    <a href="${escapeHtml(baseUrl)}/export/schema" class="btn btn-outline">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z" />
+                        </svg>
+                        Export Schema (Mermaid)
+                    </a>
+                </div>
                 <ul class="list-disc pl-5">${tables.join('')}</ul>
                 ${modals}
             `;
@@ -1734,6 +1742,148 @@ const nodemin = () => {
             }
         } catch (err) {
             console.error('Export Error:', err);
+            res.status(500).send(`Error: ${escapeHtml(err.message)}`);
+        }
+    });
+
+    // Export Full Database Schema as Mermaid ER Diagram
+    router.get('/export/schema', async (req, res) => {
+        try {
+            // Get all tables
+            const tablesResult = await pool.query(`
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                ORDER BY table_name
+            `);
+            
+            const tables = tablesResult.rows.map(r => r.table_name);
+            
+            // Get all columns, primary keys, and foreign keys
+            const schemaData = [];
+            
+            for (const tableName of tables) {
+                // Validate table name
+                if (!validateIdentifier(tableName)) continue;
+                
+                // Get columns
+                const columnsResult = await pool.query(`
+                    SELECT column_name, data_type, is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = $1
+                    ORDER BY ordinal_position
+                `, [tableName]);
+                
+                // Get primary keys
+                const pkResult = await pool.query(`
+                    SELECT a.attname as column_name
+                    FROM pg_index i
+                    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                    WHERE i.indrelid = $1::regclass AND i.indisprimary
+                `, [`"${tableName}"`]);
+                const primaryKeys = pkResult.rows.map(r => r.column_name);
+                
+                // Get foreign keys
+                const fkResult = await pool.query(`
+                    SELECT
+                        kcu.column_name,
+                        ccu.table_name AS referenced_table,
+                        ccu.column_name AS referenced_column
+                    FROM information_schema.table_constraints AS tc
+                    JOIN information_schema.key_column_usage AS kcu
+                        ON tc.constraint_name = kcu.constraint_name
+                        AND tc.table_schema = kcu.table_schema
+                    JOIN information_schema.constraint_column_usage AS ccu
+                        ON ccu.constraint_name = tc.constraint_name
+                        AND ccu.table_schema = tc.table_schema
+                    WHERE tc.constraint_type = 'FOREIGN KEY'
+                        AND tc.table_name = $1
+                        AND tc.table_schema = 'public'
+                `, [tableName]);
+                
+                schemaData.push({
+                    tableName,
+                    columns: columnsResult.rows,
+                    primaryKeys,
+                    foreignKeys: fkResult.rows
+                });
+            }
+            
+            // Build Mermaid ER diagram
+            let mermaidDiagram = 'erDiagram\n';
+            const relationships = [];
+            
+            for (const table of schemaData) {
+                mermaidDiagram += `    ${table.tableName} {\n`;
+                
+                for (const col of table.columns) {
+                    let constraints = [];
+                    if (table.primaryKeys.includes(col.column_name)) {
+                        constraints.push('PK');
+                    }
+                    if (table.foreignKeys.some(fk => fk.column_name === col.column_name)) {
+                        constraints.push('FK');
+                    }
+                    if (col.is_nullable === 'NO') {
+                        constraints.push('NOT NULL');
+                    }
+                    const constraintStr = constraints.length > 0 ? ` "${constraints.join(', ')}"` : '';
+                    mermaidDiagram += `        ${col.data_type} ${col.column_name}${constraintStr}\n`;
+                }
+                
+                mermaidDiagram += `    }\n`;
+                
+                // Add relationships
+                for (const fk of table.foreignKeys) {
+                    const rel = `    ${table.tableName} }|..|| ${fk.referenced_table} : "${fk.column_name} -> ${fk.referenced_column}"`;
+                    relationships.push(rel);
+                }
+            }
+            
+            // Add relationships to diagram
+            mermaidDiagram += '\n' + relationships.join('\n') + '\n';
+            
+            // Build markdown document
+            const timestamp = new Date().toISOString().split('T')[0];
+            let markdown = `# Database Schema Documentation\n\n`;
+            markdown += `> Generated on ${timestamp}\n\n`;
+            markdown += `## Entity Relationship Diagram\n\n`;
+            markdown += '```mermaid\n';
+            markdown += mermaidDiagram;
+            markdown += '```\n\n';
+            markdown += '---\n\n';
+            markdown += '## Tables\n\n';
+            
+            for (const table of schemaData) {
+                markdown += `### ${table.tableName}\n\n`;
+                markdown += `| Column | Type | Nullable | Default | Constraints |\n`;
+                markdown += `|--------|------|----------|---------|-------------|\n`;
+                
+                for (const col of table.columns) {
+                    let constraints = [];
+                    if (table.primaryKeys.includes(col.column_name)) constraints.push('PK');
+                    if (table.foreignKeys.some(fk => fk.column_name === col.column_name)) constraints.push('FK');
+                    
+                    markdown += `| ${col.column_name} | ${col.data_type} | ${col.is_nullable} | ${col.column_default || '-'} | ${constraints.join(', ') || '-'} |\n`;
+                }
+                
+                if (table.foreignKeys.length > 0) {
+                    markdown += '\n**Foreign Keys:**\n';
+                    for (const fk of table.foreignKeys) {
+                        markdown += `- \`${fk.column_name}\` → \`${fk.referenced_table}.${fk.referenced_column}\`\n`;
+                    }
+                }
+                
+                markdown += '\n---\n\n';
+            }
+            
+            // Send as downloadable markdown file
+            res.setHeader('Content-Type', 'text/markdown');
+            res.setHeader('Content-Disposition', `attachment; filename="schema_${timestamp}.md"`);
+            res.send(markdown);
+            
+        } catch (err) {
+            console.error('Schema Export Error:', err);
             res.status(500).send(`Error: ${escapeHtml(err.message)}`);
         }
     });
