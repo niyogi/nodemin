@@ -185,6 +185,12 @@ const nodemin = () => {
                             </svg>
                             History
                         </button>
+                        <button class="btn btn-ghost" onclick="loadConnectionProfiles(); document.getElementById('profiles_modal').showModal()">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0z" />
+                            </svg>
+                            Profiles
+                        </button>
                         <button class="btn btn-primary" onclick="document.getElementById('sql_modal').showModal()">Execute SQL</button>
                         <a href="${baseUrl}/logout" class="btn btn-outline btn-error">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
@@ -262,6 +268,34 @@ const nodemin = () => {
                         </div>
                         <div class="modal-action">
                             <button type="button" class="btn" onclick="document.getElementById('history_modal').close()">Close</button>
+                        </div>
+                    </div>
+                </dialog>
+                
+                <dialog id="profiles_modal" class="modal">
+                    <div class="modal-box max-w-2xl">
+                        <h3 class="font-bold text-lg mb-4">Connection Profiles</h3>
+                        <div id="profiles-list" class="space-y-2 mb-4 max-h-64 overflow-y-auto">
+                            <p class="text-gray-500">No saved profiles...</p>
+                        </div>
+                        <div class="divider">Add New Profile</div>
+                        <form id="profile-form" class="space-y-3">
+                            <div class="grid grid-cols-2 gap-3">
+                                <input type="text" name="name" placeholder="Profile Name" class="input input-bordered" required>
+                                <input type="text" name="host" placeholder="Host (e.g., localhost)" class="input input-bordered" required>
+                                <input type="number" name="port" placeholder="Port (5432)" class="input input-bordered" value="5432">
+                                <input type="text" name="database" placeholder="Database Name" class="input input-bordered" required>
+                                <input type="text" name="username" placeholder="Username" class="input input-bordered" required>
+                                <input type="password" name="password" placeholder="Password" class="input input-bordered">
+                            </div>
+                            <label class="label cursor-pointer justify-start gap-2">
+                                <input type="checkbox" name="ssl" class="checkbox">
+                                <span class="label-text">Use SSL</span>
+                            </label>
+                        </form>
+                        <div class="modal-action">
+                            <button type="button" class="btn btn-primary" onclick="saveConnectionProfile()">Save Profile</button>
+                            <button type="button" class="btn" onclick="document.getElementById('profiles_modal').close()">Close</button>
                         </div>
                     </div>
                 </dialog>
@@ -482,6 +516,84 @@ const nodemin = () => {
                     .then(() => {
                         document.getElementById('query-history-list').innerHTML = '<p class="text-gray-500">No queries yet...</p>';
                         window.queryHistoryData = [];
+                    })
+                    .catch(error => {
+                        console.error('Error clearing history:', error);
+                    });
+                }
+                
+                // Connection Profiles Functions
+                function loadConnectionProfiles() {
+                    fetch('${baseUrl}/api/profiles')
+                        .then(response => response.json())
+                        .then(profiles => {
+                            const listEl = document.getElementById('profiles-list');
+                            if (profiles.length === 0) {
+                                listEl.innerHTML = '<p class="text-gray-500">No saved profiles...</p>';
+                                return;
+                            }
+                            listEl.innerHTML = profiles.map(profile => `
+                                <div class="card bg-base-200">
+                                    <div class="card-body p-3 flex justify-between items-center">
+                                        <div>
+                                            <h4 class="font-bold">${escapeHtml(profile.name)}</h4>
+                                            <p class="text-sm text-gray-500">${escapeHtml(profile.host)}:${profile.port}/${escapeHtml(profile.database)}</p>
+                                        </div>
+                                        <button class="btn btn-sm btn-error" onclick="deleteConnectionProfile('${profile.id}')">Delete</button>
+                                    </div>
+                                </div>
+                            `).join('');
+                        })
+                        .catch(error => {
+                            console.error('Error loading profiles:', error);
+                        });
+                }
+                
+                function saveConnectionProfile() {
+                    const form = document.getElementById('profile-form');
+                    const formData = new FormData(form);
+                    const data = {
+                        name: formData.get('name'),
+                        host: formData.get('host'),
+                        port: formData.get('port'),
+                        database: formData.get('database'),
+                        username: formData.get('username'),
+                        password: formData.get('password'),
+                        ssl: formData.get('ssl') === 'on'
+                    };
+                    
+                    fetch('${baseUrl}/api/profiles', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-CSRF-Token': '${csrfToken}'
+                        },
+                        body: JSON.stringify(data)
+                    })
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.success) {
+                            form.reset();
+                            loadConnectionProfiles();
+                        } else {
+                            alert('Error: ' + result.error);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error saving profile:', error);
+                    });
+                }
+                
+                function deleteConnectionProfile(profileId) {
+                    if (!confirm('Delete this profile?')) return;
+                    fetch('${baseUrl}/api/profiles/' + profileId, {
+                        method: 'DELETE',
+                        headers: {
+                            'X-CSRF-Token': '${csrfToken}'
+                        }
+                    })
+                    .then(() => {
+                        loadConnectionProfiles();
                     })
                     .catch(error => {
                         console.error('Error clearing history:', error);
@@ -1393,6 +1505,78 @@ const nodemin = () => {
     router.post('/clear-query-history', (req, res) => {
         const sessionId = getSessionId(req);
         queryHistory.delete(sessionId);
+        res.json({ success: true });
+    });
+
+    // Connection Profiles API
+    // Store profiles in memory (could be extended to use a config file)
+    const connectionProfiles = new Map();
+    
+    router.get('/api/profiles', (req, res) => {
+        const sessionId = getSessionId(req);
+        const profiles = connectionProfiles.get(sessionId) || [];
+        // Don't send passwords back
+        const safeProfiles = profiles.map(p => ({
+            id: p.id,
+            name: p.name,
+            host: p.host,
+            database: p.database,
+            username: p.username,
+            // Don't include password
+        }));
+        res.json(safeProfiles);
+    });
+    
+    router.post('/api/profiles', (req, res) => {
+        try {
+            const sessionId = getSessionId(req);
+            const { name, host, port, database, username, password, ssl } = req.body;
+            
+            // Validate inputs
+            if (!name || !host || !database || !username) {
+                return res.status(400).json({ error: 'Missing required fields' });
+            }
+            
+            if (!connectionProfiles.has(sessionId)) {
+                connectionProfiles.set(sessionId, []);
+            }
+            
+            const profiles = connectionProfiles.get(sessionId);
+            const profile = {
+                id: crypto.randomUUID(),
+                name: name.substring(0, 50),
+                host: host.substring(0, 100),
+                port: parseInt(port) || 5432,
+                database: database.substring(0, 100),
+                username: username.substring(0, 100),
+                password: password, // In production, encrypt this
+                ssl: ssl || false,
+                createdAt: new Date().toISOString()
+            };
+            
+            profiles.push(profile);
+            res.json({ success: true, profile: { id: profile.id, name: profile.name } });
+        } catch (err) {
+            res.status(500).json({ error: err.message });
+        }
+    });
+    
+    router.delete('/api/profiles/:id', (req, res) => {
+        const sessionId = getSessionId(req);
+        const profileId = req.params.id;
+        
+        if (!connectionProfiles.has(sessionId)) {
+            return res.status(404).json({ error: 'Profile not found' });
+        }
+        
+        const profiles = connectionProfiles.get(sessionId);
+        const index = profiles.findIndex(p => p.id === profileId);
+        
+        if (index === -1) {
+            return res.status(404).json({ error: 'Profile not found' });
+        }
+        
+        profiles.splice(index, 1);
         res.json({ success: true });
     });
 
