@@ -675,13 +675,29 @@ const nodemin = () => {
             
             const content = `
                 <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-2xl">${tableName}</h2>
-                    ${!config.isReadOnly ? `<button class="btn btn-primary" onclick="document.getElementById('insert_modal_${tableName}').showModal()">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                        </svg>
-                        Insert
-                    </button>` : ''}
+                    <h2 class="text-2xl">${escapeHtml(tableName)}</h2>
+                    <div class="flex gap-2">
+                        <div class="dropdown dropdown-end">
+                            <div tabindex="0" role="button" class="btn btn-outline">
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                                </svg>
+                                Export
+                            </div>
+                            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow bg-base-100 rounded-box w-52">
+                                <li><a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/export?format=csv">Export as CSV</a></li>
+                                <li><a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/export?format=json">Export as JSON</a></li>
+                                <li><a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/export?format=csv&all=true">Export All as CSV</a></li>
+                                <li><a href="${escapeHtml(baseUrl)}/table/${escapeHtml(tableName)}/export?format=json&all=true">Export All as JSON</a></li>
+                            </ul>
+                        </div>
+                        ${!config.isReadOnly ? `<button class="btn btn-primary" onclick="document.getElementById('insert_modal_${escapeHtml(tableName)}').showModal()">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                            </svg>
+                            Insert
+                        </button>` : ''}
+                    </div>
                 </div>
                 <form class="mb-4 flex gap-2" method="GET" action="${baseUrl}/table/${tableName}/search">
                     <input type="text" name="q" placeholder="Search table..." class="input input-bordered w-full max-w-xs">
@@ -1074,6 +1090,86 @@ const nodemin = () => {
             }
         });
     }
+
+    // Export table data to CSV or JSON
+    router.get('/table/:tableName/export', async (req, res) => {
+        try {
+            const tableName = req.params.tableName;
+            const format = req.query.format || 'csv';
+            const exportAll = req.query.all === 'true';
+            
+            // Validate table name
+            if (!validateIdentifier(tableName)) {
+                return res.status(400).send('Invalid table name');
+            }
+            
+            // Validate format
+            if (!['csv', 'json'].includes(format)) {
+                return res.status(400).send('Invalid format. Use csv or json');
+            }
+            
+            // Get column information
+            const columnInfo = await pool.query(`
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_schema = 'public' AND table_name = $1
+                ORDER BY ordinal_position
+            `, [tableName]);
+            
+            const columns = columnInfo.rows.map(row => row.column_name);
+            
+            // Fetch data
+            let query;
+            if (exportAll) {
+                query = `SELECT * FROM "${tableName}"`;
+            } else {
+                query = `SELECT * FROM "${tableName}" LIMIT $1`;
+            }
+            
+            const result = exportAll 
+                ? await pool.query(query)
+                : await pool.query(query, [config.rowsPerPage]);
+            
+            // Sanitize filename
+            const safeTableName = tableName.replace(/[^a-zA-Z0-9_]/g, '');
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            const filename = `${safeTableName}_${timestamp}.${format}`;
+            
+            if (format === 'json') {
+                // JSON export
+                res.setHeader('Content-Type', 'application/json');
+                res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+                res.json(result.rows);
+            } else {
+                // CSV export with security sanitization
+                res.setHeader('Content-Type', 'text/csv');
+                res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+                
+                // CSV header
+                const csvHeader = columns.map(col => `"${col.replace(/"/g, '""')}"`).join(',');
+                
+                // CSV rows with proper escaping to prevent CSV injection
+                const csvRows = result.rows.map(row => {
+                    return columns.map(col => {
+                        const val = row[col];
+                        if (val === null) return '';
+                        const str = String(val);
+                        // Escape quotes and wrap in quotes if contains special chars
+                        const needsQuotes = str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r');
+                        const escaped = str.replace(/"/g, '""');
+                        // Prevent formula injection by prefixing with single quote if starts with =, +, -, @
+                        const sanitized = /^[=+\-@]/.test(escaped) ? "'" + escaped : escaped;
+                        return needsQuotes ? `"${sanitized}"` : sanitized;
+                    }).join(',');
+                });
+                
+                res.send([csvHeader, ...csvRows].join('\n'));
+            }
+        } catch (err) {
+            console.error('Export Error:', err);
+            res.status(500).send(`Error: ${escapeHtml(err.message)}`);
+        }
+    });
 
     // Logout route
     router.get('/logout', (req, res) => {
