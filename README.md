@@ -9,6 +9,7 @@ A lightweight Node.js module for managing PostgreSQL databases through a web int
   - View table structure with column details
   - Browse table data with pagination
   - Search across all columns using PostgreSQL full-text search
+  - Interactive Schema Map (ER diagram) with zoom, pan, and clickable table nodes
   
 - **Data Management**
   - Insert new records with type-appropriate form fields
@@ -126,6 +127,16 @@ The home screen displays all tables in your database's public schema. From here 
 - Use the theme selector to change the UI appearance
 - Execute custom SQL queries
 - Log out of the application
+
+### Schema Map
+
+Click **Schema Map** on the home screen (or **Schema** in the top navigation) to open an interactive ER diagram of your database:
+
+- Scroll (or pinch on touch devices) to zoom toward the cursor
+- Click and drag to pan
+- Click any table node (or a table name in the sidebar) to jump to that table's data view
+- Use the +/−/Reset controls to adjust the view
+- The diagram re-themes with the selected UI theme
 
 ### Table View
 

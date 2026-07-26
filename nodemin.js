@@ -130,7 +130,100 @@ const nodemin = () => {
             return [];
         }
     }
-    
+
+    // Build structured schema data (tables, columns, primary keys, foreign keys)
+    // for the public schema. Used by the schema map and schema export routes.
+    async function buildSchemaData() {
+        const tablesResult = await pool.query(`
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+            ORDER BY table_name
+        `);
+
+        const tables = tablesResult.rows.map(r => r.table_name);
+        const schemaData = [];
+
+        for (const tableName of tables) {
+            if (!validateIdentifier(tableName)) continue;
+
+            const columnsResult = await pool.query(`
+                SELECT column_name, data_type, is_nullable, column_default
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = $1
+                ORDER BY ordinal_position
+            `, [tableName]);
+
+            const pkResult = await pool.query(`
+                SELECT a.attname as column_name
+                FROM pg_index i
+                JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                WHERE i.indrelid = $1::regclass AND i.indisprimary
+            `, [`"${tableName}"`]);
+            const primaryKeys = pkResult.rows.map(r => r.column_name);
+
+            const fkResult = await pool.query(`
+                SELECT
+                    kcu.column_name,
+                    ccu.table_name AS referenced_table,
+                    ccu.column_name AS referenced_column
+                FROM information_schema.table_constraints AS tc
+                JOIN information_schema.key_column_usage AS kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.constraint_column_usage AS ccu
+                    ON ccu.constraint_name = tc.constraint_name
+                    AND ccu.table_schema = tc.table_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                    AND tc.table_name = $1
+                    AND tc.table_schema = 'public'
+            `, [tableName]);
+
+            schemaData.push({
+                tableName,
+                columns: columnsResult.rows,
+                primaryKeys,
+                foreignKeys: fkResult.rows
+            });
+        }
+
+        return schemaData;
+    }
+
+    // Render schema data as a Mermaid erDiagram source string.
+    function buildMermaidErDiagram(schemaData) {
+        let mermaidDiagram = 'erDiagram\n';
+        const relationships = [];
+
+        for (const table of schemaData) {
+            mermaidDiagram += `    ${table.tableName} {\n`;
+
+            for (const col of table.columns) {
+                const constraints = [];
+                if (table.primaryKeys.includes(col.column_name)) {
+                    constraints.push('PK');
+                }
+                if (table.foreignKeys.some(fk => fk.column_name === col.column_name)) {
+                    constraints.push('FK');
+                }
+                if (col.is_nullable === 'NO') {
+                    constraints.push('NOT NULL');
+                }
+                const constraintStr = constraints.length > 0 ? ` "${constraints.join(', ')}"` : '';
+                mermaidDiagram += `        ${col.data_type} ${col.column_name}${constraintStr}\n`;
+            }
+
+            mermaidDiagram += `    }\n`;
+
+            for (const fk of table.foreignKeys) {
+                relationships.push(`    ${table.tableName} }|..|| ${fk.referenced_table} : "${fk.column_name} -> ${fk.referenced_column}"`);
+            }
+        }
+
+        mermaidDiagram += '\n' + relationships.join('\n') + '\n';
+        return mermaidDiagram;
+    }
+
     // Map PostgreSQL data types to HTML input types
     function getInputTypeForDataType(dataType) {
         const typeMap = {
@@ -229,6 +322,12 @@ const nodemin = () => {
                             </svg>
                             Profiles
                         </button>
+                        <a href="${baseUrl}/schema" class="btn btn-ghost">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+                            </svg>
+                            Schema
+                        </a>
                         <button class="btn btn-primary" onclick="document.getElementById('sql_modal').showModal()">Execute SQL</button>
                         <a href="${baseUrl}/logout" class="btn btn-outline btn-error">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
@@ -359,6 +458,18 @@ const nodemin = () => {
             <script>
                 // CodeMirror editor instance
                 let sqlEditor;
+
+                // Client-side HTML escaping (mirrors server escapeHtml) for
+                // client-rendered lists (query history, profiles, bookmarks).
+                function escapeHtml(text) {
+                    if (text === null || text === undefined) return '';
+                    return String(text)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/"/g, '&quot;')
+                        .replace(/'/g, '&#39;');
+                }
                 
                 // Load saved theme from localStorage or detect system preference
                 document.addEventListener('DOMContentLoaded', function() {
@@ -553,19 +664,19 @@ const nodemin = () => {
                                 listEl.innerHTML = '<p class="text-gray-500">No queries yet...</p>';
                                 return;
                             }
-                            listEl.innerHTML = history.map((item, index) => `
-                                <div class="card bg-base-200 cursor-pointer hover:bg-base-300" onclick="loadQueryFromHistory(${index})">
+                            listEl.innerHTML = history.map((item, index) => \`
+                                <div class="card bg-base-200 cursor-pointer hover:bg-base-300" onclick="loadQueryFromHistory(\${index})">
                                     <div class="card-body p-3">
                                         <div class="flex justify-between items-start">
-                                            <code class="text-sm break-all">${escapeHtml(item.query.substring(0, 100))}${item.query.length > 100 ? '...' : ''}</code>
-                                            <span class="text-xs text-gray-500">${new Date(item.timestamp).toLocaleTimeString()}</span>
+                                            <code class="text-sm break-all">\${escapeHtml(item.query.substring(0, 100))}\${item.query.length > 100 ? '...' : ''}</code>
+                                            <span class="text-xs text-gray-500">\${new Date(item.timestamp).toLocaleTimeString()}</span>
                                         </div>
                                         <div class="text-xs text-gray-500 mt-1">
-                                            ${item.command} • ${item.rowCount} rows
+                                            \${item.command} • \${item.rowCount} rows
                                         </div>
                                     </div>
                                 </div>
-                            `).join('');
+                            \`).join('');
                             // Store history for loading
                             window.queryHistoryData = history;
                         })
@@ -611,17 +722,17 @@ const nodemin = () => {
                                 listEl.innerHTML = '<p class="text-gray-500">No saved profiles...</p>';
                                 return;
                             }
-                            listEl.innerHTML = profiles.map(profile => `
+                            listEl.innerHTML = profiles.map(profile => \`
                                 <div class="card bg-base-200">
                                     <div class="card-body p-3 flex justify-between items-center">
                                         <div>
-                                            <h4 class="font-bold">${escapeHtml(profile.name)}</h4>
-                                            <p class="text-sm text-gray-500">${escapeHtml(profile.host)}:${profile.port}/${escapeHtml(profile.database)}</p>
+                                            <h4 class="font-bold">\${escapeHtml(profile.name)}</h4>
+                                            <p class="text-sm text-gray-500">\${escapeHtml(profile.host)}:\${profile.port}/\${escapeHtml(profile.database)}</p>
                                         </div>
-                                        <button class="btn btn-sm btn-error" onclick="deleteConnectionProfile('${profile.id}')">Delete</button>
+                                        <button class="btn btn-sm btn-error" onclick="deleteConnectionProfile('\${profile.id}')">Delete</button>
                                     </div>
                                 </div>
-                            `).join('');
+                            \`).join('');
                         })
                         .catch(error => {
                             console.error('Error loading profiles:', error);
@@ -735,18 +846,18 @@ const nodemin = () => {
                                 listEl.innerHTML = '<p class="text-gray-500">No saved bookmarks...</p>';
                                 return;
                             }
-                            listEl.innerHTML = bookmarks.map(bookmark => `
+                            listEl.innerHTML = bookmarks.map(bookmark => \`
                                 <div class="card bg-base-200">
                                     <div class="card-body p-3">
                                         <div class="flex justify-between items-start">
-                                            <h4 class="font-bold">${escapeHtml(bookmark.name)}</h4>
-                                            <button class="btn btn-sm btn-error" onclick="deleteBookmark('${bookmark.id}')">Delete</button>
+                                            <h4 class="font-bold">\${escapeHtml(bookmark.name)}</h4>
+                                            <button class="btn btn-sm btn-error" onclick="deleteBookmark('\${bookmark.id}')">Delete</button>
                                         </div>
-                                        <code class="text-sm break-all block mt-1">${escapeHtml(bookmark.query.substring(0, 100))}${bookmark.query.length > 100 ? '...' : ''}</code>
-                                        <button class="btn btn-sm btn-primary mt-2" onclick="loadBookmarkQuery('${bookmark.id}')">Load to Editor</button>
+                                        <code class="text-sm break-all block mt-1">\${escapeHtml(bookmark.query.substring(0, 100))}\${bookmark.query.length > 100 ? '...' : ''}</code>
+                                        <button class="btn btn-sm btn-primary mt-2" onclick="loadBookmarkQuery('\${bookmark.id}')">Load to Editor</button>
                                     </div>
                                 </div>
-                            `).join('');
+                            \`).join('');
                             window.bookmarksData = bookmarks;
                         })
                         .catch(error => {
@@ -903,8 +1014,7 @@ const nodemin = () => {
                 const primaryKeys = pkResult.rows.map(r => r.attname);
                 
                 // Get foreign keys
-                const fkResult = await getForeignKeys(tableName);
-                const foreignKeys = fkResult.rows;
+                const foreignKeys = await getForeignKeys(tableName);
 
                 const columnRows = columns.rows.map(col => {
                     const fk = foreignKeys.find(fk => fk.column_name === col.column_name);
@@ -962,12 +1072,20 @@ const nodemin = () => {
             const content = `
                 <div class="flex justify-between items-center mb-4">
                     <h2 class="text-2xl">Tables</h2>
-                    <a href="${escapeHtml(baseUrl)}/export/schema" class="btn btn-outline">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z" />
-                        </svg>
-                        Export Schema (Mermaid)
-                    </a>
+                    <div class="flex gap-2">
+                        <a href="${escapeHtml(baseUrl)}/schema" class="btn btn-primary">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
+                            </svg>
+                            Schema Map
+                        </a>
+                        <a href="${escapeHtml(baseUrl)}/export/schema" class="btn btn-outline">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 mr-1">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M7.5 14.25v2.25m3-4.5v4.5m3-6.75v6.75m3-9v9M6 20.25h12A2.25 2.25 0 0020.25 18V6A2.25 2.25 0 0018 3.75H6A2.25 2.25 0 003.75 6v12A2.25 2.25 0 006 20.25z" />
+                            </svg>
+                            Export Schema (Mermaid)
+                        </a>
+                    </div>
                 </div>
                 <ul class="list-disc pl-5">${tables.join('')}</ul>
                 ${modals}
@@ -1747,6 +1865,271 @@ const nodemin = () => {
     });
 
     // Export Full Database Schema as Mermaid ER Diagram
+    // Schema Map - Interactive, zoomable/pannable Mermaid ER diagram
+    router.get('/schema', async (req, res) => {
+        try {
+            const baseUrl = res.locals.baseUrl;
+            const sessionId = getSessionId(req);
+            const csrfToken = generateCsrfToken(sessionId);
+
+            const schemaData = await buildSchemaData();
+
+            if (schemaData.length === 0) {
+                const emptyContent = `
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-2xl">Schema Map</h2>
+                        <a href="${escapeHtml(baseUrl)}/" class="btn btn-outline">Back to Tables</a>
+                    </div>
+                    <div class="alert alert-info">
+                        <span>No tables found in the public schema.</span>
+                    </div>
+                `;
+                return res.send(getHtmlTemplate(emptyContent, baseUrl, csrfToken));
+            }
+
+            const mermaidDiagram = buildMermaidErDiagram(schemaData);
+            const tableUrlMap = {};
+            const sidebarHtml = schemaData.map(table => {
+                const colCount = table.columns.length;
+                tableUrlMap[table.tableName] = `${baseUrl}/table/${table.tableName}`;
+                return `
+                    <li>
+                        <a href="${escapeHtml(baseUrl)}/table/${escapeHtml(table.tableName)}" class="justify-between">
+                            <span>${escapeHtml(table.tableName)}</span>
+                            <span class="badge badge-sm badge-ghost">${colCount} col${colCount === 1 ? '' : 's'}</span>
+                        </a>
+                    </li>
+                `;
+            }).join('');
+
+            const content = `
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl">Schema Map</h2>
+                    <div class="flex gap-2">
+                        <button class="btn btn-sm" onclick="schemaZoomIn()" title="Zoom in">+</button>
+                        <button class="btn btn-sm" onclick="schemaZoomOut()" title="Zoom out">&minus;</button>
+                        <button class="btn btn-sm" onclick="schemaReset()" title="Reset view">Reset</button>
+                        <a href="${escapeHtml(baseUrl)}/export/schema" class="btn btn-sm btn-outline">Export Mermaid</a>
+                    </div>
+                </div>
+                <p class="text-sm text-gray-500 mb-2">Scroll to zoom &bull; Drag to pan &bull; Click a table to open it</p>
+                <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
+                    <div class="lg:col-span-3 card bg-base-100 shadow">
+                        <div id="schema-map" class="card-body items-start p-2 select-none" style="height:80vh; overflow:hidden; cursor:grab;">
+                            <div id="schema-canvas" style="transform-origin:0 0; will-change:transform;">
+                                <div id="schema-mermaid" class="mermaid"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card bg-base-100 shadow">
+                        <div class="card-body p-3" style="max-height:80vh; overflow-y:auto;">
+                            <h3 class="font-bold text-lg mb-2">Tables (${schemaData.length})</h3>
+                            <ul class="menu menu-sm w-full">
+                                ${sidebarHtml}
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+                <script>
+                    (function () {
+                        var schemaDiagramSource = ${JSON.stringify(mermaidDiagram)};
+                        var schemaTableUrls = ${JSON.stringify(tableUrlMap)};
+                        var schemaScale = 1, schemaX = 0, schemaY = 0;
+                        var schemaDragging = false, schemaMoved = false;
+                        var schemaDStartX = 0, schemaDStartY = 0, schemaStartTX = 0, schemaStartTY = 0;
+                        var schemaMapEl = null, schemaCanvasEl = null;
+
+                        function schemaDarkTheme() {
+                            var t = document.documentElement.getAttribute('data-theme') || 'light';
+                            return ['dark', 'dracula', 'synthwave', 'cyberpunk', 'forest'].indexOf(t) >= 0 ? 'dark' : 'default';
+                        }
+
+                        function applySchemaTransform() {
+                            if (schemaCanvasEl) {
+                                schemaCanvasEl.style.transform = 'translate(' + schemaX + 'px,' + schemaY + 'px) scale(' + schemaScale + ')';
+                            }
+                        }
+
+                        function schemaSetScale(s, cx, cy) {
+                            var newScale = Math.min(8, Math.max(0.15, s));
+                            if (cx !== undefined && cy !== undefined && schemaMapEl) {
+                                var rect = schemaMapEl.getBoundingClientRect();
+                                var mx = cx - rect.left;
+                                var my = cy - rect.top;
+                                var px = (mx - schemaX) / schemaScale;
+                                var py = (my - schemaY) / schemaScale;
+                                schemaX = mx - px * newScale;
+                                schemaY = my - py * newScale;
+                            }
+                            schemaScale = newScale;
+                            applySchemaTransform();
+                        }
+
+                        function schemaCenter() {
+                            if (!schemaMapEl) return { x: undefined, y: undefined };
+                            var r = schemaMapEl.getBoundingClientRect();
+                            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                        }
+
+                        window.schemaZoomIn = function () {
+                            var c = schemaCenter();
+                            schemaSetScale(schemaScale * 1.25, c.x, c.y);
+                        };
+                        window.schemaZoomOut = function () {
+                            var c = schemaCenter();
+                            schemaSetScale(schemaScale / 1.25, c.x, c.y);
+                        };
+                        window.schemaReset = function () {
+                            schemaScale = 1; schemaX = 0; schemaY = 0;
+                            applySchemaTransform();
+                        };
+
+                        function schemaAttachNodeClicks() {
+                            var svg = document.querySelector('#schema-mermaid svg');
+                            if (!svg) return;
+                            svg.style.maxWidth = 'none';
+                            svg.style.height = 'auto';
+                            var linked = {};
+                            var texts = svg.querySelectorAll('text');
+                            for (var i = 0; i < texts.length; i++) {
+                                var t = texts[i];
+                                var name = (t.textContent || '').trim();
+                                if (schemaTableUrls[name] && !linked[name]) {
+                                    linked[name] = true;
+                                    var node = t.parentElement;
+                                    var entityGroup = null;
+                                    while (node && node !== svg) {
+                                        if (node.tagName.toLowerCase() === 'g' && node.querySelector('rect')) {
+                                            entityGroup = node;
+                                            break;
+                                        }
+                                        node = node.parentElement;
+                                    }
+                                    var target = entityGroup || t.parentElement || t;
+                                    target.style.cursor = 'pointer';
+                                    (function (url) {
+                                        target.addEventListener('click', function (ev) {
+                                            ev.stopPropagation();
+                                            if (schemaMoved) return;
+                                            window.location.href = url;
+                                        });
+                                    })(schemaTableUrls[name]);
+                                }
+                            }
+                        }
+
+                        function schemaInitPanZoom() {
+                            schemaMapEl = document.getElementById('schema-map');
+                            schemaCanvasEl = document.getElementById('schema-canvas');
+                            if (!schemaMapEl || !schemaCanvasEl) return;
+
+                            schemaMapEl.addEventListener('wheel', function (e) {
+                                e.preventDefault();
+                                var factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+                                schemaSetScale(schemaScale * factor, e.clientX, e.clientY);
+                            }, { passive: false });
+
+                            schemaMapEl.addEventListener('mousedown', function (e) {
+                                if (e.button !== 0) return;
+                                schemaDragging = true;
+                                schemaMoved = false;
+                                schemaDStartX = e.clientX;
+                                schemaDStartY = e.clientY;
+                                schemaStartTX = schemaX;
+                                schemaStartTY = schemaY;
+                                schemaMapEl.style.cursor = 'grabbing';
+                            });
+
+                            window.addEventListener('mousemove', function (e) {
+                                if (!schemaDragging) return;
+                                var dx = e.clientX - schemaDStartX;
+                                var dy = e.clientY - schemaDStartY;
+                                if (Math.abs(dx) > 3 || Math.abs(dy) > 3) schemaMoved = true;
+                                schemaX = schemaStartTX + dx;
+                                schemaY = schemaStartTY + dy;
+                                applySchemaTransform();
+                            });
+
+                            window.addEventListener('mouseup', function () {
+                                if (schemaDragging) {
+                                    schemaDragging = false;
+                                    schemaMapEl.style.cursor = 'grab';
+                                }
+                            });
+
+                            var touchState = null;
+                            schemaMapEl.addEventListener('touchstart', function (e) {
+                                if (e.touches.length === 1) {
+                                    touchState = { type: 'pan', x: e.touches[0].clientX, y: e.touches[0].clientY, tx: schemaX, ty: schemaY };
+                                } else if (e.touches.length === 2) {
+                                    var dx = e.touches[0].clientX - e.touches[1].clientX;
+                                    var dy = e.touches[0].clientY - e.touches[1].clientY;
+                                    touchState = { type: 'pinch', dist: Math.hypot(dx, dy), scale: schemaScale, cx: (e.touches[0].clientX + e.touches[1].clientX) / 2, cy: (e.touches[0].clientY + e.touches[1].clientY) / 2 };
+                                }
+                            }, { passive: true });
+
+                            schemaMapEl.addEventListener('touchmove', function (e) {
+                                if (!touchState) return;
+                                if (touchState.type === 'pan' && e.touches.length === 1) {
+                                    e.preventDefault();
+                                    schemaX = touchState.tx + (e.touches[0].clientX - touchState.x);
+                                    schemaY = touchState.ty + (e.touches[0].clientY - touchState.y);
+                                    applySchemaTransform();
+                                } else if (touchState.type === 'pinch' && e.touches.length === 2) {
+                                    e.preventDefault();
+                                    var dx = e.touches[0].clientX - e.touches[1].clientX;
+                                    var dy = e.touches[0].clientY - e.touches[1].clientY;
+                                    var ratio = Math.hypot(dx, dy) / touchState.dist;
+                                    schemaSetScale(touchState.scale * ratio, touchState.cx, touchState.cy);
+                                }
+                            }, { passive: false });
+
+                            schemaMapEl.addEventListener('touchend', function () { touchState = null; }, { passive: true });
+                        }
+
+                        function schemaRender() {
+                            if (typeof mermaid === 'undefined') return;
+                            var el = document.getElementById('schema-mermaid');
+                            if (!el) return;
+                            el.removeAttribute('data-processed');
+                            el.textContent = schemaDiagramSource;
+                            try {
+                                mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', er: { useMaxWidth: false }, theme: schemaDarkTheme() });
+                            } catch (e) { /* re-initialize on theme change is safe */ }
+                            mermaid.run({ querySelector: '#schema-mermaid' }).then(function () {
+                                schemaAttachNodeClicks();
+                                if (!schemaMapEl) schemaInitPanZoom();
+                            }).catch(function (err) {
+                                el.innerHTML = '<div class="alert alert-error"><span>Failed to render schema diagram: ' + String(err && err.message ? err.message : err) + '</span></div>';
+                            });
+                        }
+
+                        function schemaBoot() {
+                            schemaRender();
+                            document.addEventListener('themechange', function () {
+                                schemaScale = 1; schemaX = 0; schemaY = 0;
+                                applySchemaTransform();
+                                schemaRender();
+                            });
+                        }
+
+                        if (document.readyState === 'loading') {
+                            document.addEventListener('DOMContentLoaded', schemaBoot);
+                        } else {
+                            schemaBoot();
+                        }
+                    })();
+                </script>
+            `;
+
+            res.send(getHtmlTemplate(content, baseUrl, csrfToken));
+        } catch (err) {
+            console.error('Schema Map Error:', err);
+            res.send(getHtmlTemplate(`<div class="alert alert-error"><span>Error: ${escapeHtml(err.message)}</span></div>`, res.locals.baseUrl));
+        }
+    });
+
     router.get('/export/schema', async (req, res) => {
         try {
             // Get all tables
